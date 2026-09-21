@@ -6,7 +6,7 @@
 // icon). Old caches are deleted on activate, and browsers only pick up a
 // new service worker (and therefore a fresh cache) once VERSION changes -
 // otherwise users may keep seeing a stale cached shell after an update.
-const VERSION = "20260921182050";
+const VERSION = "20260921232311";
 const CACHE_NAME = `bach-advisor-shell-${VERSION}`;
 
 // Every file the app shell needs to run fully offline. Paths are relative
