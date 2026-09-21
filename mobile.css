@@ -1,0 +1,258 @@
+/* mobile/mobile.css
+   Touch/phone adaptation layered on top of style.css. Loaded only by
+   mobile/index.html (desktop frontend never loads this file, so desktop
+   behavior is untouched). Keeps the same sage palette / Calibri stack / RTL.
+*/
+
+/* ---------- safe areas (all viewport sizes, since this page always runs
+   as an installable PWA that may be launched full-screen / notched) ---------- */
+
+body {
+  padding-top: env(safe-area-inset-top);
+  padding-inline-start: env(safe-area-inset-left);
+  padding-inline-end: env(safe-area-inset-right);
+}
+
+.sidebar {
+  padding-top: calc(21px + env(safe-area-inset-top, 0px));
+}
+
+.main {
+  padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+}
+
+.toast-region {
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+}
+
+/* ---------- standalone (installed) mode niceties ---------- */
+
+@media (display-mode: standalone) {
+  .sidebar {
+    padding-top: calc(30px + env(safe-area-inset-top, 0px));
+  }
+}
+
+button,
+.btn,
+.patient-item,
+.session-card,
+.flower-option {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.btn:active:not(:disabled),
+.patient-item:active,
+.session-card:active,
+.flower-option:active {
+  background: var(--sage-tint);
+}
+
+/* ---------- backup block ---------- */
+
+.backup-block { margin-top: 4px; }
+
+.backup-details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-field);
+  padding: 8px 10px;
+}
+
+.backup-details summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+}
+
+.backup-details summary::-webkit-details-marker { display: none; }
+
+.backup-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.backup-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.backup-hint {
+  font-size: 9px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* =====================================================================
+   Phone-width adaptations (phones in portrait/landscape; tablets keep the
+   desktop-like layout from style.css's own 700px breakpoint).
+   ===================================================================== */
+
+@media (max-width: 700px) {
+  /* -------- touch targets & no auto-zoom on iOS -------- */
+
+  input[type=text],
+  input[type=datetime-local],
+  textarea,
+  select {
+    font-size: 16px;
+  }
+
+  .btn {
+    min-height: 44px;
+    font-size: 13px;
+  }
+
+  .patient-item {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    font-size: 14px;
+  }
+
+  .session-actions .btn {
+    min-height: 40px;
+    padding: 0 12px;
+  }
+
+  /* -------- readable base type on phones -------- */
+
+  body { font-size: 15px; }
+  .section-title { font-size: 15px; }
+  .page-title { font-size: 24px; }
+  label { font-size: 13px; }
+  .badge,
+  .pill { font-size: 12px; }
+  .reason { font-size: 14px; }
+  .msg { font-size: 15px; }
+  .msg-label { font-size: 12px; }
+  .brand-subtitle { font-size: 11px; }
+  .patient-list-label { font-size: 11px; }
+  .page-eyebrow { font-size: 11px; }
+  .remedy-name-en { font-size: 12px; }
+  .session-summary { font-size: 12px; }
+  .field-hint,
+  .field-error { font-size: 11px; }
+
+  /* -------- compact sidebar header -------- */
+
+  .sidebar {
+    padding: calc(12px + env(safe-area-inset-top, 0px)) 12px 12px;
+    gap: 10px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+  }
+
+  .patients-block {
+    max-height: 40vh;
+    overflow-y: auto;
+  }
+
+  .patient-list {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 6px;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .patient-list li { flex-shrink: 0; }
+
+  .patient-item {
+    white-space: nowrap;
+    padding: 10px 14px;
+  }
+
+  /* backup block collapsed into a small details on phones */
+  .backup-details summary { font-size: 11px; }
+  .backup-details { padding: 6px 10px; }
+
+  /* -------- main content -------- */
+
+  .main { padding: 14px 12px; }
+
+  .page-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .header-actions { width: 100%; }
+  .header-actions .btn { flex: 1; }
+  .header-actions .btn-remove { margin-inline-start: 0; }
+
+  /* -------- proposal layout stacks -------- */
+
+  .proposal-layout {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .proposal-aside { width: auto; }
+
+  /* -------- composer stacks -------- */
+
+  .composer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .composer .btn { min-height: 44px; }
+
+  /* -------- session cards wrap nicely, no h-scroll -------- */
+
+  .session-card {
+    flex-wrap: wrap;
+    padding: 12px;
+  }
+
+  .session-time { order: 0; }
+  .session-info { order: 1; flex-basis: 100%; }
+  .badge { order: 2; }
+  .session-actions {
+    order: 3;
+    width: 100%;
+    justify-content: flex-start;
+    margin-top: 6px;
+  }
+
+  .form-grid { grid-template-columns: 1fr; }
+
+  .remedy-card { flex-wrap: wrap; }
+  .remedy-body { flex-basis: 100%; min-width: 0; }
+
+  .msg-row, .msg.answer { max-width: 100%; }
+}
+
+/* No horizontal scroll at very small widths */
+@media (max-width: 360px) {
+  .app { overflow-x: hidden; }
+  .session-time { width: 40px; }
+}
+
+/* ---------- print (unaffected by mobile adaptation) ---------- */
+
+@media print {
+  .backup-block,
+  .backup-details { display: none; }
+}
+
+/* iOS/iPadOS zoom into any field under 16px on focus — applies at every
+   width on the mobile build (tablets too), including the inline reason editor. */
+input[type=text],
+input[type=datetime-local],
+textarea,
+textarea.reason-input,
+select {
+  font-size: 16px;
+}
