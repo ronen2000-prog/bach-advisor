@@ -698,8 +698,13 @@ function renderOptionAnswerForm(patient, session, container, question) {
       (opt) => `
         <label class="option-row" data-option-id="${escapeHtml(opt.id)}">
           <input type="checkbox" class="option-checkbox" value="${escapeHtml(opt.id)}" ${opt.suggested ? "checked" : ""}>
-          <span class="option-label">${escapeHtml(opt.label)}</span>
-          ${opt.suggested ? `<span class="suggest-tag">עלה מהתיאור</span>` : ""}
+          <span class="option-body">
+            <span class="option-label-row">
+              <span class="option-label">${escapeHtml(opt.label)}</span>
+              ${opt.suggested ? `<span class="suggest-tag">עלה מהתיאור</span>` : ""}
+            </span>
+            ${opt.hint ? `<span class="option-hint">${escapeHtml(opt.hint)}</span>` : ""}
+          </span>
         </label>
       `
     )
@@ -777,6 +782,26 @@ function renderOptionAnswerForm(patient, session, container, question) {
   };
 }
 
+function buildAnalysisBodyHtml(generalNotes) {
+  const lines = (generalNotes || "").split("\n");
+  const banners = [];
+  const restLines = [];
+  lines.forEach((line) => {
+    if (line.startsWith("⚠️")) {
+      banners.push({ level: "red", text: line.replace(/^⚠️\s*/, "") });
+    } else if (line.startsWith("ℹ️")) {
+      banners.push({ level: "amber", text: line.replace(/^ℹ️\s*/, "") });
+    } else if (line.trim()) {
+      restLines.push(line);
+    }
+  });
+  const bannersHtml = banners
+    .map((b) => `<div class="safety-banner safety-banner-${b.level}">${escapeHtml(b.text)}</div>`)
+    .join("");
+  const restHtml = restLines.length ? `<p>${escapeHtml(restLines.join(" "))}</p>` : "";
+  return bannersHtml + restHtml;
+}
+
 function renderProposalEditor(patient, session, options = {}) {
   const editMode = options.editMode === true;
 
@@ -785,7 +810,7 @@ function renderProposalEditor(patient, session, options = {}) {
     ? `
       <div class="card analysis-card">
         <h2 class="section-title">ניתוח המטופל/ת</h2>
-        <p>${escapeHtml(session.general_notes || "")}</p>
+        ${buildAnalysisBodyHtml(session.general_notes)}
       </div>
     `
     : "";

@@ -236,6 +236,7 @@ button,
   /* -------- structured questionnaire checkboxes: comfortable touch target -------- */
 
   .option-row { min-height: 44px; }
+  .option-hint { font-size: 13px; }
 }
 
 /* No horizontal scroll at very small widths */
