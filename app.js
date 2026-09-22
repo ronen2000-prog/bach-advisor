@@ -646,6 +646,14 @@ function renderSession(patient, session, options = {}) {
 }
 
 function renderAnswerForm(patient, session, container) {
+  const lastQuestion = [...session.transcript].reverse().find((entry) => entry.type === "question");
+  if (lastQuestion && Array.isArray(lastQuestion.options) && lastQuestion.options.length) {
+    renderOptionAnswerForm(patient, session, container, lastQuestion);
+    return;
+  }
+
+  // שאלה בלי options (שיחה legacy, לפני השדרוג לשאלון המובנה) - קומפוזר טקסט
+  // חופשי ישן, בדיוק כמו קודם.
   const card = document.createElement("div");
   card.className = "card composer-card";
   card.innerHTML = `
@@ -668,6 +676,94 @@ function renderAnswerForm(patient, session, container) {
     }
     const btn = e.currentTarget;
     setButtonBusy(btn, true, "חושב...");
+    try {
+      const updated = await api(`/api/sessions/${session.id}/answer`, {
+        method: "POST",
+        body: JSON.stringify({ answer }),
+      });
+      openSession(patient, session.id, updated);
+    } catch (err) {
+      showToast(err.message, "error");
+      setButtonBusy(btn, false);
+    }
+  };
+}
+
+function renderOptionAnswerForm(patient, session, container, question) {
+  const card = document.createElement("div");
+  card.className = "card composer-card";
+
+  const optionsHtml = question.options
+    .map(
+      (opt) => `
+        <label class="option-row" data-option-id="${escapeHtml(opt.id)}">
+          <input type="checkbox" class="option-checkbox" value="${escapeHtml(opt.id)}" ${opt.suggested ? "checked" : ""}>
+          <span class="option-label">${escapeHtml(opt.label)}</span>
+          ${opt.suggested ? `<span class="suggest-tag">עלה מהתיאור</span>` : ""}
+        </label>
+      `
+    )
+    .join("");
+
+  card.innerHTML = `
+    <div class="option-list">${optionsHtml}</div>
+    <div class="field">
+      <label for="answerNoteInput">הערה נוספת (לא חובה)</label>
+      <textarea id="answerNoteInput" placeholder="מידע חופשי נוסף, אם יש..."></textarea>
+    </div>
+    <button class="btn btn-primary" id="submitAnswerBtn" type="button">המשך</button>
+  `;
+  container.appendChild(card);
+
+  const rows = Array.from(card.querySelectorAll(".option-row"));
+  const checkboxes = rows.map((row) => row.querySelector(".option-checkbox"));
+  const noneCheckbox = checkboxes.find((cb) => cb.value === "none") || null;
+
+  function syncRowCheckedClass(cb) {
+    const row = cb.closest(".option-row");
+    if (row) row.classList.toggle("is-checked", cb.checked);
+  }
+
+  checkboxes.forEach((cb) => {
+    syncRowCheckedClass(cb);
+    cb.addEventListener("change", () => {
+      if (noneCheckbox) {
+        if (cb === noneCheckbox && cb.checked) {
+          checkboxes.forEach((other) => {
+            if (other !== noneCheckbox) {
+              other.checked = false;
+              syncRowCheckedClass(other);
+            }
+          });
+        } else if (cb !== noneCheckbox && cb.checked) {
+          noneCheckbox.checked = false;
+          syncRowCheckedClass(noneCheckbox);
+        }
+      }
+      syncRowCheckedClass(cb);
+    });
+  });
+
+  document.getElementById("submitAnswerBtn").onclick = async (e) => {
+    const checked = checkboxes.filter((cb) => cb.checked);
+    if (checked.length === 0) {
+      showToast("יש לסמן לפחות אפשרות אחת, או 'אף אחד מאלה'", "error");
+      return;
+    }
+    const labels = checked
+      .map((cb) => question.options.find((opt) => opt.id === cb.value))
+      .filter(Boolean)
+      .map((opt) => opt.label);
+
+    const noteInput = document.getElementById("answerNoteInput");
+    const note = noteInput.value.trim();
+    let answer = labels.join("\n");
+    if (note) {
+      answer += (answer ? "\n" : "") + "הערה: " + note;
+    }
+
+    const btn = e.currentTarget;
+    setButtonBusy(btn, true, "שולח...");
     try {
       const updated = await api(`/api/sessions/${session.id}/answer`, {
         method: "POST",

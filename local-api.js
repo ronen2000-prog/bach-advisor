@@ -132,7 +132,15 @@
 
   function applyStep(sessionId, transcript, step) {
     if (step.type === "question") {
-      var withQuestion = transcript.concat([{ type: "question", text: step.text }]);
+      var questionEntry = { type: "question", text: step.text };
+      // שאלות מהשאלון המובנה נושאות question_id/options/multi; שאלות legacy
+      // (אם קורה שהמנוע אי-פעם יחזיר כאלה) לא, וזה בסדר - advisor-engine.js
+      // יודע להתמודד עם תמליל בלי השדות האלה (ר' _isLegacyTranscript), בדיוק
+      // כמו main.py._apply_step.
+      if (step.question_id !== undefined) questionEntry.question_id = step.question_id;
+      if (step.options !== undefined) questionEntry.options = step.options;
+      if (step.multi !== undefined) questionEntry.multi = step.multi;
+      var withQuestion = transcript.concat([questionEntry]);
       return storeMod.update_transcript(sessionId, withQuestion).then(function () {
         return storeMod.mark_in_progress(sessionId);
       });

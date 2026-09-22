@@ -1,22 +1,18 @@
 // מנוע ההתאמה של יועץ התמציות - פורט נאמן של backend/advisor_engine.py
-// (הגרסה המורחבת: טוקניזציה, נרמול תחיליות ואותיות סופיות, לקסיקון דפוסים
-// עם משקלים, שלילה מבוססת-הקשר, שאלות yesno/choice, ובחירת שאלה דטרמיניסטית).
+// (הגרסה עם שאלון מובנה multi-select): 7 קבוצות באך, שאלת-המשך אחת פר קבוצה
+// שנבחרה, הלקסיקון העשיר משמש רק לסימון "suggested" מראש/ציטוט/הוספה
+// בערעור (challenge add-mode), וטיפול בתמלילים legacy (מגרסאות קודמות בלי
+// question_id).
 //
-// כל מבני הנתונים (LEXICON, CLARIFYING_QUESTIONS וכו') יוצאו ישירות מהמודול
-// הפייתוני המקורי (ר' mobile/tests/gen_cases.py) כדי להבטיח התאמה מדויקת של
-// כל מחרוזת עברית, כל משקל וכל סדר - בלי הקלדה ידנית.
+// כל מבני הנתונים (LEXICON, GROUPS, REMEDY_LABELS וכו') יוצאו ישירות מהמודול
+// הפייתוני המקורי כדי להבטיח התאמה מדויקת של כל מחרוזת עברית, כל משקל וכל
+// סדר - בלי הקלדה ידנית.
 (function (global) {
   "use strict";
 
   var isNode = typeof module !== "undefined" && module.exports;
   var flowersMod = isNode ? require("./bach-flowers.js") : (global.BachApp && global.BachApp.flowers);
   var BY_KEY = flowersMod.BY_KEY;
-
-  var MIN_QUESTIONS = 2;
-  var MAX_QUESTIONS = 6;
-  var MAX_REMEDIES_IN_BLEND = 6;
-  var QUALIFY_MIN_SCORE = 2;
-  var QUALITY_GATE_MIN_SCORE = 3;
 
   var REMEDY_ORDER = [
   "rock_rose",
@@ -100,8 +96,6 @@
   "rock_water",
   "rescue_remedy"
 ];
-  var REMEDY_INDEX = {};
-  REMEDY_ORDER.forEach(function (k, i) { REMEDY_INDEX[k] = i; });
 
   // ==========================================================================
   // A. נרמול טקסט וטוקניזציה
@@ -180,7 +174,7 @@
   }
 
   // ==========================================================================
-  // B. הלקסיקון - דפוסים עשירים לכל תמצית (יוצא מ-Python, ר' הערה למעלה)
+  // B. הלקסיקון - דפוסים עשירים לכל תמצית (יוצא מ-Python)
   // ==========================================================================
 
   var LEXICON = {
@@ -4106,15 +4100,6 @@
     return matches;
   }
 
-  function _cuesPresent(tokens, cues) {
-    for (var i = 0; i < tokens.length; i++) {
-      for (var j = 0; j < cues.length; j++) {
-        if (_stemMatches(tokens[i], cues[j])) return true;
-      }
-    }
-    return false;
-  }
-
   // ==========================================================================
   // D. עדות וניקוד
   // ==========================================================================
@@ -4125,20 +4110,13 @@
     return store;
   }
 
-  function _record(evidence, rejected, key, weight, source, surface, topic) {
+  function _record(evidence, key, weight, source, surface) {
     var item = { weight: weight, source: source };
     if (surface !== undefined && surface !== null) item.surface = surface;
-    if (topic !== undefined && topic !== null) item.topic = topic;
     evidence[key].push(item);
-    if (weight >= 3 && rejected[key]) rejected[key] = false;
   }
 
-  function _rejectKey(evidence, rejected, key, topic) {
-    rejected[key] = true;
-    evidence[key].push({ weight: 0, source: "rejected", topic: topic !== undefined ? topic : null });
-  }
-
-  function _scoreText(tokens, evidence, rejected, source) {
+  function _scoreText(tokens, evidence, source) {
     ALL_KEYS.forEach(function (key) {
       LEXICON[key].forEach(function (pattern) {
         var terms = pattern.terms;
@@ -4146,703 +4124,212 @@
           var start = range[0], end = range[1];
           if (_isNegated(tokens, start, terms)) return;
           var surface = tokens.slice(start, end).join(" ");
-          _record(evidence, rejected, key, pattern.weight, source, surface, null);
+          _record(evidence, key, pattern.weight, source, surface);
         });
       });
     });
   }
 
-  function _scores(evidence, rejected, excludeSources) {
-    excludeSources = excludeSources || [];
+  function _scores(evidence) {
     var result = {};
     ALL_KEYS.forEach(function (key) {
-      if (rejected[key]) {
-        result[key] = 0;
-      } else {
-        var sum = 0;
-        evidence[key].forEach(function (item) {
-          if (excludeSources.indexOf(item.source) === -1) sum += item.weight;
-        });
-        result[key] = sum;
-      }
+      var sum = 0;
+      evidence[key].forEach(function (item) { sum += item.weight; });
+      result[key] = sum;
     });
     return result;
   }
 
-  function _questionSelectionScores(evidence, rejected) {
-    return _scores(evidence, rejected, ["confirmed_weak"]);
-  }
-
-  function _hasConfirmed(items) {
-    return items.some(function (item) {
-      return item.source === "confirmed" && item.weight >= QUALITY_GATE_MIN_SCORE;
-    });
+  function _matchedSurfaces(items, limit) {
+    if (limit === undefined) limit = 4;
+    var quotes = [];
+    for (var i = 0; i < items.length; i++) {
+      var surface = items[i].surface;
+      if (surface && quotes.indexOf(surface) === -1) quotes.push(surface);
+      if (quotes.length >= limit) break;
+    }
+    return quotes;
   }
 
   // ==========================================================================
-  // E. שאלות הבהרה ופענוח תשובות
+  // E. שאלון מובנה - 7 קבוצות באך, ואז שאלת-משנה אחת פר קבוצה שנבחרה
   // ==========================================================================
 
-  var CLARIFYING_QUESTIONS = [
+  var SUGGEST_MIN_SCORE = 2;
+  var SOFT_BLEND_SIZE_NOTE_THRESHOLD = 6;
+
+  var GROUPS = [
   {
-    "id": "opening_group",
-    "topic": "כיוון רגשי כללי",
-    "opening": true,
-    "kind": "choice",
-    "text": "מה הרגש המרכזי שמעסיק את המטופל/ת כרגע: פחד וחרדה, התלבטות וחוסר ביטחון בקבלת החלטות, עצבות או עייפות מתמשכת, בדידות וקושי בקשר עם אחרים, נטייה להיות מושפע/ת יתר על המידה מהסביבה, ייאוש ותחושת אשמה, או צורך לשלוט בהתנהגות של אחרים ולשנות אותם?",
-    "options": [
-      {
-        "keys": [
-          "rock_rose",
-          "mimulus",
-          "cherry_plum",
-          "aspen",
-          "red_chestnut"
-        ],
-        "cues": [
-          "פחד",
-          "חרד",
-          "פאניקה",
-          "בהלה"
-        ]
-      },
-      {
-        "keys": [
-          "cerato",
-          "scleranthus",
-          "gentian",
-          "gorse",
-          "hornbeam",
-          "wild_oat"
-        ],
-        "cues": [
-          "מתלבט",
-          "להחליט",
-          "ביטחון",
-          "כיוון",
-          "תקווה",
-          "דחיינות"
-        ]
-      },
-      {
-        "keys": [
-          "clematis",
-          "honeysuckle",
-          "wild_rose",
-          "olive",
-          "white_chestnut",
-          "mustard",
-          "chestnut_bud"
-        ],
-        "cues": [
-          "עצוב",
-          "עייף",
-          "מנותק",
-          "געגוע",
-          "אדיש",
-          "מחשבות",
-          "דיכאון"
-        ]
-      },
-      {
-        "keys": [
-          "water_violet",
-          "impatiens",
-          "heather"
-        ],
-        "cues": [
-          "לבד",
-          "בדיד",
-          "סבלנות",
-          "חברה"
-        ]
-      },
-      {
-        "keys": [
-          "agrimony",
-          "centaury",
-          "walnut",
-          "holly"
-        ],
-        "cues": [
-          "מסתיר",
-          "לסרב",
-          "שינוי",
-          "כעס",
-          "קנאה"
-        ]
-      },
-      {
-        "keys": [
-          "larch",
-          "pine",
-          "elm",
-          "sweet_chestnut",
-          "star_of_bethlehem",
-          "willow",
-          "oak",
-          "crab_apple"
-        ],
-        "cues": [
-          "ייאוש",
-          "אשמה",
-          "עומס",
-          "הלם",
-          "טראומה",
-          "מרירות",
-          "נחיתות"
-        ]
-      },
-      {
-        "keys": [
-          "chicory",
-          "vervain",
-          "vine",
-          "beech",
-          "rock_water"
-        ],
-        "cues": [
-          "שולט",
-          "לשנות",
-          "ביקורתי",
-          "נוקש",
-          "שתלטן",
-          "תובעני"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "mimulus_vs_aspen",
-    "topic": "סוג הפחד",
-    "kind": "choice",
-    "text": "האם הפחד של המטופל/ת מתמקד במשהו ספציפי וידוע (למשל מבחן, מצב חברתי, חיה או מחלה מסוימת), או שמדובר בפחד מעורפל שאין לו מקור ברור?",
-    "options": [
-      {
-        "keys": [
-          "mimulus"
-        ],
-        "cues": [
-          "מבחן",
-          "בחינ",
-          "חיה",
-          "מחלה",
-          "ספציפי",
-          "ידוע",
-          "מסוים"
-        ]
-      },
-      {
-        "keys": [
-          "aspen"
-        ],
-        "cues": [
-          "מעורפל",
-          "סתמי",
-          "ברור"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "mimulus_vs_larch",
-    "topic": "אופי החשש",
-    "kind": "choice",
-    "text": "כשעולה הפחד הזה אצל המטופל/ת - האם זה בעיקר פחד מהמצב או מהדבר עצמו, בעיקר ציפייה מראש לכישלון וחוסר ביטחון ביכולת, או שני הדברים יחד?",
-    "options": [
-      {
-        "keys": [
-          "mimulus"
-        ],
-        "cues": [
-          "מהמצב",
-          "מהמבחן",
-          "מהחוויה"
-        ]
-      },
-      {
-        "keys": [
-          "larch"
-        ],
-        "cues": [
-          "כישלון",
-          "לא מספיק טוב",
-          "בטוח",
-          "ייכשל",
-          "תיכשל"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "cerato_vs_scleranthus",
-    "topic": "אופי חוסר הביטחון בהחלטות",
-    "kind": "choice",
-    "text": "האם המטופל/ת נוטה להתייעץ עם כולם ולא לסמוך על שיפוט עצמו, או שהקושי הוא בעיקר בהכרעה בין שתי אפשרויות עם תנודות מצב רוח?",
-    "options": [
-      {
-        "keys": [
-          "cerato"
-        ],
-        "cues": [
-          "מתייעץ",
-          "שואל",
-          "כולם",
-          "דעה",
-          "אישור"
-        ]
-      },
-      {
-        "keys": [
-          "scleranthus"
-        ],
-        "cues": [
-          "מתלבט",
-          "שתי",
-          "אפשרויות",
-          "להכריע"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "gentian_gorse_sweetchestnut",
-    "topic": "עומק הייאוש",
-    "kind": "choice",
-    "text": "האם מדובר בייאוש קל וזמני אחרי כישלון או מכשול נקודתי, בתחושת חוסר תקווה עמוקה וממושכת, או בייאוש קיצוני שמרגיש כמו קצה גבול היכולת הנפשית?",
-    "options": [
-      {
-        "keys": [
-          "gentian"
-        ],
-        "cues": [
-          "קל",
-          "זמני",
-          "נקודתי",
-          "כישלון"
-        ]
-      },
-      {
-        "keys": [
-          "gorse"
-        ],
-        "cues": [
-          "עמוק",
-          "ממושך",
-          "תקווה"
-        ]
-      },
-      {
-        "keys": [
-          "sweet_chestnut"
-        ],
-        "cues": [
-          "קיצוני",
-          "קצה",
-          "גבול"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "olive_vs_hornbeam",
-    "topic": "סוג העייפות",
-    "kind": "choice",
-    "text": "האם מדובר בתשישות פיזית ונפשית מוחלטת אחרי מאמץ או תקופה ממושכת וקשה, או בעייפות נפשית וחוסר חשק להתחיל משימות, שחולפת ברגע שמתחילים בפועל?",
-    "options": [
-      {
-        "keys": [
-          "olive"
-        ],
-        "cues": [
-          "מוחלטת",
-          "ממושכת",
-          "פיזית"
-        ]
-      },
-      {
-        "keys": [
-          "hornbeam"
-        ],
-        "cues": [
-          "להתחיל",
-          "דחיינות",
-          "משימות"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "elm_vs_oak",
-    "topic": "עומס מול התמדה",
-    "kind": "choice",
-    "text": "האם מדובר בתחושת עומס זמנית מאחריות גדולה, אצל אדם שבדרך כלל מתפקד היטב, או בהתמדה עיקשת ללא ויתור וללא בקשת עזרה למרות תשישות מתמשכת?",
-    "options": [
-      {
-        "keys": [
-          "elm"
-        ],
-        "cues": [
-          "עומס",
-          "מוצף",
-          "אחריות"
-        ]
-      },
-      {
-        "keys": [
-          "oak"
-        ],
-        "cues": [
-          "מוותר",
-          "עזרה",
-          "ממשיך",
-          "מתמיד"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "elm_vs_sweet_chestnut",
-    "topic": "עומס מול ייאוש קיצוני",
-    "kind": "choice",
-    "text": "האם תחושת העומס היא זמנית ומצבית אצל אדם שבדרך כלל מסתדר היטב, או שמדובר בייאוש עמוק וממושך שמרגיש כמו קצה גבול היכולת?",
-    "options": [
-      {
-        "keys": [
-          "elm"
-        ],
-        "cues": [
-          "זמני",
-          "מצבי",
-          "בדרך כלל מסתדר"
-        ]
-      },
-      {
-        "keys": [
-          "sweet_chestnut"
-        ],
-        "cues": [
-          "עמוק",
-          "ממושך",
-          "קצה",
-          "גבול"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "heather_vs_water_violet",
-    "topic": "יחס לבדידות",
-    "kind": "choice",
-    "text": "האם המטופל/ת מעדיף/ה להתבודד ולשמור מרחק רגשי, או שהוא/היא זקוק/ה מאוד לתשומת לב וקשה לו/לה להיות לבד?",
-    "options": [
-      {
-        "keys": [
-          "water_violet"
-        ],
-        "cues": [
-          "מעדיף",
-          "לבד",
-          "מרחק",
-          "מסתגר"
-        ]
-      },
-      {
-        "keys": [
-          "heather"
-        ],
-        "cues": [
-          "תשומת",
-          "לב",
-          "זקוק",
-          "לחברה"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "impatiens_vs_vervain",
-    "topic": "אופי חוסר המנוחה",
-    "kind": "choice",
-    "text": "האם יש חוסר סבלנות בולט וצורך למהר ולעשות הכול לבד, או שמדובר בהתלהבות יתר לרעיון או מטרה, עד כדי קושי להירגע ולוותר?",
-    "options": [
-      {
-        "keys": [
-          "impatiens"
-        ],
-        "cues": [
-          "סבלנות",
-          "ממהר",
-          "מהר"
-        ]
-      },
-      {
-        "keys": [
-          "vervain"
-        ],
-        "cues": [
-          "התלהבות",
-          "קנאי",
-          "רעיון"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "vine_vs_chicory",
-    "topic": "אופי הצורך בשליטה",
-    "kind": "choice",
-    "text": "האם המטופל/ת נוטה להיות שתלטן/ית ולדרוש שאחרים ינהגו בדיוק כפי שנראה לו/לה נכון, או שהוא/היא נותן/ת אהבה ותמיכה תוך ציפייה מובלעת לקבל תשומת לב בתמורה?",
-    "options": [
-      {
-        "keys": [
-          "vine"
-        ],
-        "cues": [
-          "שתלטן",
-          "מכתיב",
-          "רודני",
-          "ציות"
-        ]
-      },
-      {
-        "keys": [
-          "chicory"
-        ],
-        "cues": [
-          "תובענית",
-          "תשומת",
-          "מתערב"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "beech_vs_rock_water",
-    "topic": "כיוון הביקורתיות",
-    "kind": "choice",
-    "text": "האם המטופל/ת ביקורתי/ת בעיקר כלפי אחרים וקשה לו/לה לקבל התנהגות שונה משלו/ה, או שהוא/היא נוקש/ה בעיקר כלפי עצמו/ה, פרפקציוניסט/ית, ומסרב/ת לאפשר לעצמו/ה הנאה או גמישות?",
-    "options": [
-      {
-        "keys": [
-          "beech"
-        ],
-        "cues": [
-          "באחרים",
-          "אחרים",
-          "מבקר"
-        ]
-      },
-      {
-        "keys": [
-          "rock_water"
-        ],
-        "cues": [
-          "עצמו",
-          "עצמה",
-          "פרפקציוניסט",
-          "מחמיר"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "white_chestnut",
-    "topic": "מחשבות טורדניות",
-    "kind": "yesno",
+    "id": "fear",
+    "group_he": "פחד",
+    "label": "פחד וחרדה - פחדים ספציפיים, חרדה מעורפלת, פאניקה או דאגת יתר לאחרים",
     "keys": [
-      "white_chestnut"
-    ],
-    "text": "האם יש מחשבות חוזרות וטורדניות שקשה להשתיק, במיוחד בשעות הלילה?"
-  },
-  {
-    "id": "star_of_bethlehem",
-    "topic": "רקע של הלם או טראומה",
-    "kind": "yesno",
-    "keys": [
-      "star_of_bethlehem"
-    ],
-    "text": "האם יש רקע של אירוע מטלטל, הלם, אובדן או טראומה שעדיין משפיע על המטופל/ת?"
-  },
-  {
-    "id": "walnut",
-    "topic": "הסתגלות לשינוי",
-    "kind": "yesno",
-    "keys": [
-      "walnut"
-    ],
-    "text": "האם מדובר בקושי להסתגל לשינוי או מעבר משמעותי בחיים (כגון גירושין, מעבר דירה, לידה או עבודה חדשה)?"
-  },
-  {
-    "id": "pine",
-    "topic": "אשמה עצמית",
-    "kind": "yesno",
-    "keys": [
-      "pine"
-    ],
-    "text": "האם יש נטייה להאשים את עצמו/ה ולהתנצל, גם כשאין סיבה אמיתית לכך?"
-  },
-  {
-    "id": "holly",
-    "topic": "כעס וקנאה",
-    "kind": "yesno",
-    "keys": [
-      "holly"
-    ],
-    "text": "האם עולים כעס, קנאה או חשדנות בולטים כלפי אחרים?"
-  },
-  {
-    "id": "willow",
-    "topic": "מרירות ותחושת עוול",
-    "kind": "yesno",
-    "keys": [
-      "willow"
-    ],
-    "text": "האם יש תחושת מרירות, עוול, או האשמת הנסיבות והסביבה במצבו/ה?"
-  },
-  {
-    "id": "agrimony",
-    "topic": "הסתרת מצוקה",
-    "kind": "yesno",
-    "keys": [
-      "agrimony"
-    ],
-    "text": "האם המטופל/ת נוטה להסתיר מצוקה מאחורי חיוך וחזות עליזה כלפי חוץ?"
-  },
-  {
-    "id": "centaury",
-    "topic": "קושי לסרב",
-    "kind": "yesno",
-    "keys": [
-      "centaury"
-    ],
-    "text": "האם קשה למטופל/ת לסרב לבקשות של אחרים ולעמוד על שלו/ה?"
-  },
-  {
-    "id": "red_chestnut",
-    "topic": "דאגה לאנשים קרובים",
-    "kind": "yesno",
-    "keys": [
+      "rock_rose",
+      "mimulus",
+      "cherry_plum",
+      "aspen",
       "red_chestnut"
     ],
-    "text": "האם הדאגה מופנית בעיקר כלפי אנשים קרובים (כמו ילדים או בן/בת זוג), יותר מאשר כלפי המטופל/ת עצמו/ה?"
-  },
-  {
-    "id": "cherry_plum",
-    "topic": "פחד מאיבוד שליטה",
-    "kind": "yesno",
-    "keys": [
-      "cherry_plum"
-    ],
-    "text": "האם עולה חשש מאיבוד שליטה עצמית או ממחשבות שמפחידות את המטופל/ת בעצמו/ה?"
-  },
-  {
-    "id": "clematis_vs_honeysuckle",
-    "topic": "כיוון הבריחה מההווה",
-    "kind": "choice",
-    "text": "האם יש נטייה לברוח במחשבות אל העתיד ולהתנתק מההווה, לעומת קושי להשתחרר מזיכרונות וגעגוע לתקופה שחלפה?",
-    "options": [
-      {
-        "keys": [
-          "clematis"
-        ],
-        "cues": [
-          "עתיד",
-          "בעננים",
-          "חולם"
-        ]
-      },
-      {
-        "keys": [
-          "honeysuckle"
-        ],
-        "cues": [
-          "עבר",
-          "געגוע",
-          "זיכרונות"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "wild_rose_vs_mustard",
-    "topic": "אדישות מול עצבות פתאומית",
-    "kind": "choice",
-    "text": "האם מדובר באדישות כללית וחוסר מוטיבציה מתמשך, או בעצבות/דיכאון שיורדים בפתאומיות ובלי סיבה ברורה, כמו ענן שחור?",
-    "options": [
-      {
-        "keys": [
-          "wild_rose"
-        ],
-        "cues": [
-          "אדיש",
-          "מתמשך",
-          "מוטיבציה"
-        ]
-      },
-      {
-        "keys": [
-          "mustard"
-        ],
-        "cues": [
-          "פתאום",
-          "ענן",
-          "פתאומי"
-        ]
-      }
-    ]
-  },
-  {
-    "id": "crab_apple",
-    "topic": "תחושת טומאה או פגם",
-    "kind": "yesno",
-    "keys": [
-      "crab_apple"
-    ],
-    "text": "האם עולה תחושת גועל עצמי, אובססיה לניקיון, או התמקדות מוגזמת בפגם קטן?"
-  },
-  {
-    "id": "chestnut_bud",
-    "topic": "חזרה על אותה טעות",
-    "kind": "yesno",
-    "keys": [
-      "chestnut_bud"
-    ],
-    "text": "האם המטופל/ת חוזר/ת שוב ושוב על אותה טעות או דפוס, בלי ללמוד מהניסיון?"
-  },
-  {
-    "id": "wild_oat",
-    "topic": "כיוון בחיים",
-    "kind": "yesno",
-    "keys": [
-      "wild_oat"
-    ],
-    "text": "האם יש חוסר כיוון כללי בחיים, קושי לבחור דרך או מקצוע, למרות יכולות טובות?"
-  },
-  {
-    "id": "rock_rose",
-    "topic": "פאניקה או בהלה חריפה",
-    "kind": "yesno",
-    "keys": [
-      "rock_rose"
-    ],
-    "text": "האם היו התקפי פאניקה או בהלה חריפה וקיצונית?"
-  },
-  {
-    "id": "rescue_check",
-    "topic": "משבר אקוטי",
-    "kind": "yesno",
-    "keys": [
+    "extra_keys": [
       "rescue_remedy"
-    ],
-    "text": "האם מדובר במצב משבר אקוטי, הלם או פאניקה שקרו ממש עכשיו וזקוקים למענה מיידי?"
+    ]
+  },
+  {
+    "id": "uncertainty",
+    "group_he": "חוסר ודאות",
+    "label": "חוסר ודאות - קושי להחליט, חוסר ביטחון בשיפוט עצמי, ייאוש מהיר מכישלון",
+    "keys": [
+      "cerato",
+      "scleranthus",
+      "gentian",
+      "gorse",
+      "hornbeam",
+      "wild_oat"
+    ]
+  },
+  {
+    "id": "interest",
+    "group_he": "חוסר עניין בהווה",
+    "label": "חוסר עניין בהווה - עצבות, שעמום, עייפות, מחשבות טורדניות או געגוע לעבר",
+    "keys": [
+      "clematis",
+      "honeysuckle",
+      "wild_rose",
+      "olive",
+      "white_chestnut",
+      "mustard",
+      "chestnut_bud"
+    ]
+  },
+  {
+    "id": "loneliness",
+    "group_he": "בדידות",
+    "label": "בדידות - העדפת בדידות, או לחלופין קושי להיות לבד וחוסר סבלנות",
+    "keys": [
+      "water_violet",
+      "impatiens",
+      "heather"
+    ]
+  },
+  {
+    "id": "oversensitive",
+    "group_he": "רגישות יתר להשפעה",
+    "label": "רגישות יתר להשפעה - קושי לסרב, הסתרת מצוקה, קושי בשינויים, כעס",
+    "keys": [
+      "agrimony",
+      "centaury",
+      "walnut",
+      "holly"
+    ]
+  },
+  {
+    "id": "despondency",
+    "group_he": "ייאוש וייסורים",
+    "label": "ייאוש וייסורים - אשמה, חוסר ביטחון עצמי, עומס, הלם, מרירות או תשישות קשה",
+    "keys": [
+      "larch",
+      "pine",
+      "elm",
+      "sweet_chestnut",
+      "star_of_bethlehem",
+      "willow",
+      "oak",
+      "crab_apple"
+    ]
+  },
+  {
+    "id": "overcare",
+    "group_he": "דאגת יתר לזולת",
+    "label": "דאגת יתר לזולת - צורך לשלוט, ביקורתיות, נוקשות עצמית, התלהבות יתר",
+    "keys": [
+      "chicory",
+      "vervain",
+      "vine",
+      "beech",
+      "rock_water"
+    ]
   }
 ];
 
-  var QUESTION_BY_TEXT = {};
-  CLARIFYING_QUESTIONS.forEach(function (q) { QUESTION_BY_TEXT[q.text] = q; });
-  var QUESTION_ORDER = {};
-  CLARIFYING_QUESTIONS.forEach(function (q, i) { QUESTION_ORDER[q.id] = i; });
+  var GROUP_BY_ID = {};
+  GROUPS.forEach(function (g) { GROUP_BY_ID[g.id] = g; });
+  var GROUP_ORDER = {};
+  GROUPS.forEach(function (g, i) { GROUP_ORDER[g.id] = i; });
+
+  var NONE_OPTION_LABEL = "אף אחד מאלה";
+
+  var REMEDY_LABELS = {
+  "rock_rose": "פאניקה, בהלה או אימה עזה במצב חירום נפשי",
+  "mimulus": "פחד ממשהו מוגדר ומוכר (מבחן, מחלה, חיות, חושך), ביישנות",
+  "cherry_plum": "פחד לאבד שליטה עצמית, מחשבות או דחפים שמפחידים",
+  "aspen": "פחד או חרדה מעורפלים, בלי מקור ברור",
+  "red_chestnut": "דאגת יתר לשלום אנשים קרובים (ילדים, בן/בת זוג)",
+  "rescue_remedy": "מצב חירום או הלם אקוטי שקרה ממש עכשיו",
+  "cerato": "לא סומך/ת על שיפוט עצמו/ה, מתייעץ/ת עם כולם לפני החלטה",
+  "scleranthus": "מתלבט/ת בין שתי אפשרויות, קשה להכריע, תנודות מצב רוח",
+  "gentian": "מתייאש/ת בקלות אחרי כישלון או מכשול נקודתי",
+  "gorse": "תחושת חוסר תקווה עמוקה, ויתור על סיכוי לשיפור",
+  "hornbeam": "עייפות נפשית וחוסר חשק להתחיל, שחולפת ברגע שמתחילים",
+  "wild_oat": "חוסר כיוון כללי בחיים, קושי לבחור דרך או מקצוע",
+  "clematis": "מנותק/ת מההווה, חולמני/ת, בורח/ת למחשבות על העתיד",
+  "honeysuckle": "געגוע לעבר, קושי להשתחרר מזיכרונות",
+  "wild_rose": "אדישות, חוסר מוטיבציה, השלמה פסיבית עם המצב",
+  "olive": "תשישות פיזית ונפשית מוחלטת אחרי מאמץ ממושך",
+  "white_chestnut": "מחשבות טורדניות וחוזרות שקשה להשתיק, בעיקר בלילה",
+  "mustard": "עצבות או דיכאון שיורדים בפתאומיות בלי סיבה ברורה",
+  "chestnut_bud": "חזרה על אותה טעות, קושי ללמוד מהניסיון",
+  "water_violet": "מעדיף/ה להיות לבד, מסתגר/ת, קושי לשתף ברגשות",
+  "impatiens": "חוסר סבלנות, ממהר/ת, מעדיף/ה לעשות הכול לבד ומהר",
+  "heather": "צורך עז בתשומת לב, קושי להיות לבד",
+  "agrimony": "מסתיר/ה מצוקה מאחורי חיוך וחזות עליזה",
+  "centaury": "קושי לסרב, כניעות יתר לרצון אחרים על חשבון הצרכים העצמיים",
+  "walnut": "קושי להסתגל לשינוי או מעבר משמעותי בחיים",
+  "holly": "כעס, קנאה או חשדנות כלפי אחרים",
+  "larch": "חוסר ביטחון עצמי, ציפייה מראש לכישלון",
+  "pine": "אשמה עצמית מוגזמת, נטייה להתנצל גם כשלא אשם/ה",
+  "elm": "עומס רגעי מאחריות גדולה, אצל אדם שבדרך כלל מתפקד היטב",
+  "sweet_chestnut": "ייאוש קיצוני, תחושת מיצוי מוחלט, קצה גבול היכולת",
+  "star_of_bethlehem": "הלם או טראומה, גם כאלה שהשפעתם נמשכת זמן רב",
+  "willow": "מרירות, תחושת קורבנות ועוול, קושי לקחת אחריות",
+  "oak": "התמדה עד כלות הכוחות, קושי לוותר או לבקש עזרה",
+  "crab_apple": "תחושת גועל או טומאה עצמית, אובססיה לניקיון או לפרט קטן",
+  "chicory": "אהבה תובענית, ציפייה לתשומת לב בתמורה לנתינה",
+  "vervain": "התלהבות יתר לרעיון או מטרה, קושי להירגע ולוותר",
+  "vine": "שליטנות, נוקשות, צורך להכתיב לאחרים כיצד לנהוג",
+  "beech": "ביקורתיות, חוסר סובלנות לחולשות ולשונות של אחרים",
+  "rock_water": "נוקשות עצמית קיצונית, פרפקציוניזם, סירוב להנאה"
+};
+
+  var GROUP_QUESTION_ID = "groups";
+  var GROUP_QUESTION_TEXT = "אילו תחומים רגשיים בולטים אצל המטופל/ת? אפשר לסמן כמה";
+
+  function _groupQuestionId(groupId) {
+    return "group_" + groupId;
+  }
+
+  function _groupDescScore(group, descScores) {
+    var keys = group.keys.concat(group.extra_keys || []);
+    var scores = keys.map(function (k) { return descScores[k] || 0; });
+    return scores.length ? Math.max.apply(null, scores) : 0;
+  }
+
+  function _buildGroupQuestion(descScores) {
+    var options = GROUPS.map(function (g) {
+      return { id: g.id, label: g.label, suggested: _groupDescScore(g, descScores) >= SUGGEST_MIN_SCORE };
+    });
+    return { question_id: GROUP_QUESTION_ID, text: GROUP_QUESTION_TEXT, multi: true, options: options };
+  }
+
+  function _buildGroupRemedyQuestion(group, descScores) {
+    var keys = group.keys.concat(group.extra_keys || []);
+    var options = keys.map(function (k) {
+      return { id: k, label: REMEDY_LABELS[k], suggested: (descScores[k] || 0) >= SUGGEST_MIN_SCORE };
+    });
+    options.push({ id: "none", label: NONE_OPTION_LABEL, suggested: false });
+    var groupName = group.label.split(" - ")[0];
+    var text = "\u05D1\u05EA\u05D7\u05D5\u05DD \u05E9\u05DC " + groupName + ": \u05DE\u05D4 \u05DE\u05EA\u05D5\u05DA \u05D4\u05D1\u05D0\u05D9\u05DD \u05DE\u05EA\u05D0\u05D9\u05DD \u05DC\u05DE\u05D8\u05D5\u05E4\u05DC/\u05EA?";
+    return { question_id: _groupQuestionId(group.id), text: text, multi: true, options: options };
+  }
 
   var CHALLENGE_PREFIX = "הערת המטפל/ת על ההרכב שהוצע:";
 
@@ -4861,17 +4348,22 @@
   "בכלל",
   "לא"
 ];
-  var PARTIAL_LEAD_LIST = [
-  "במידה",
-  "חלקית",
-  "לפעמים",
-  "קצת"
+  var NONE_WORDS_SUBSTRINGS = [
+  "אף אחד",
+  "לא זה ולא זה",
+  "none"
 ];
   var ORDINAL_STEMS = [
   "ראשון",
   "שני",
   "שלישי",
-  "רביעי"
+  "רביעי",
+  "חמישי",
+  "שישי",
+  "שביעי",
+  "שמיני",
+  "תשיעי",
+  "עשירי"
 ];
 
   function _toSet(list) {
@@ -4881,14 +4373,16 @@
   }
   var AFFIRMATIVE_LEAD = _toSet(AFFIRMATIVE_LEAD_LIST);
   var NEGATIVE_LEAD = _toSet(NEGATIVE_LEAD_LIST);
-  var PARTIAL_LEAD = _toSet(PARTIAL_LEAD_LIST);
 
   function _classifyYesno(tokens) {
     var head = tokens.slice(0, 3);
     if (head.some(function (t) { return NEGATIVE_LEAD.hasOwnProperty(t); })) return "no";
-    if (head.some(function (t) { return PARTIAL_LEAD.hasOwnProperty(t); })) return "partial";
     if (head.some(function (t) { return AFFIRMATIVE_LEAD.hasOwnProperty(t); })) return "yes";
     return null;
+  }
+
+  function _mentionsNone(rawTextLower) {
+    return NONE_WORDS_SUBSTRINGS.some(function (sub) { return rawTextLower.indexOf(sub) !== -1; });
   }
 
   function _ordinalIndex(tokens) {
@@ -4901,120 +4395,127 @@
     return null;
   }
 
-  // מחזיר "both" / "none" / Set(indices) לא-ריק / null.
-  function _classifyChoice(tokens, options) {
-    var normText = tokens.join(" ");
-    if (normText.indexOf("\u05D0\u05E3 \u05D0\u05D7\u05D3") !== -1 ||
-        normText.indexOf("\u05DC\u05D0 \u05D6\u05D4 \u05D5\u05DC\u05D0 \u05D6\u05D4") !== -1) {
-      return "none";
+  // מפענח תשובה לשאלת multi-select: קודם מנסים התאמה מדויקת שורה-שורה מול
+  // התוויות של האפשרויות. אם אין אף התאמת-לייבל, נופלים חזרה על טקסט חופשי.
+  // מחזיר {ids: [...], extraText: "..."}.
+  function _parseMultiselectAnswer(rawText, question) {
+    var options = question.options;
+    var labelToId = {};
+    options.forEach(function (opt) { labelToId[opt.label] = opt.id; });
+
+    var lines = rawText.split("\n").map(function (ln) { return ln.trim(); }).filter(function (ln) { return ln; });
+    var matchedIds = [];
+    var noteParts = [];
+    var unmatchedLines = [];
+
+    lines.forEach(function (line) {
+      if (line.indexOf("\u05D4\u05E2\u05E8\u05D4:") === 0) {
+        noteParts.push(line.slice("\u05D4\u05E2\u05E8\u05D4:".length).trim());
+        return;
+      }
+      if (labelToId.hasOwnProperty(line)) {
+        var oid = labelToId[line];
+        if (matchedIds.indexOf(oid) === -1) matchedIds.push(oid);
+      } else {
+        unmatchedLines.push(line);
+      }
+    });
+
+    if (matchedIds.length) {
+      matchedIds = matchedIds.filter(function (i) { return i !== "none"; });
+      var extraText = unmatchedLines.concat(noteParts).join(" ");
+      return { ids: matchedIds, extraText: extraText };
     }
 
-    var gamCount = 0;
-    tokens.forEach(function (t) { if (_stemMatches(t, "\u05D2\u05DD")) gamCount++; });
-    var bothWord = tokens.some(function (t) { return _stemMatches(t, "\u05E9\u05E0\u05D9\u05D4\u05DD"); });
-    if (gamCount >= 2 || bothWord) return "both";
+    var fullText = rawText.trim();
+    var tokens = tokenize(fullText);
+    if (!tokens.length) return { ids: [], extraText: "" };
+
+    if (_mentionsNone(fullText.toLowerCase())) {
+      return { ids: [], extraText: fullText };
+    }
+
+    var verdict = _classifyYesno(tokens);
+    if (verdict === "yes") {
+      var ids = options.filter(function (opt) { return opt.suggested; }).map(function (opt) { return opt.id; });
+      return { ids: ids, extraText: fullText };
+    }
+    if (verdict === "no") {
+      return { ids: [], extraText: fullText };
+    }
+
+    var ev = _newEvidenceStore();
+    _scoreText(tokens, ev, "answer");
+    var scores = _scores(ev);
+    var matched2 = options.filter(function (opt) {
+      return opt.id !== "none" && (scores[opt.id] || 0) >= SUGGEST_MIN_SCORE;
+    }).map(function (opt) { return opt.id; });
 
     var ordinal = _ordinalIndex(tokens);
     if (ordinal !== null && ordinal < options.length) {
-      var s = new Set();
-      s.add(ordinal);
-      return s;
+      var oid2 = options[ordinal].id;
+      if (oid2 !== "none" && matched2.indexOf(oid2) === -1) matched2.push(oid2);
     }
 
-    var hits = new Set();
-    options.forEach(function (opt, i) {
-      if (_cuesPresent(tokens, opt.cues || [])) hits.add(i);
-    });
-    if (hits.size === 0) return null;
-    return hits;
-  }
-
-  function _applyQuestionAnswer(question, ansTokens, evidence, rejected) {
-    var topic = question.topic !== undefined ? question.topic : null;
-    var isOpening = !!question.opening;
-    var confirmWeight = isOpening ? 1 : 3;
-    var confirmSource = isOpening ? "confirmed_weak" : "confirmed";
-
-    if (question.kind === "yesno") {
-      var verdict = _classifyYesno(ansTokens);
-      if (verdict === "yes") {
-        question.keys.forEach(function (k) { _record(evidence, rejected, k, confirmWeight, confirmSource, null, topic); });
-      } else if (verdict === "no") {
-        if (!isOpening) {
-          question.keys.forEach(function (k) { _rejectKey(evidence, rejected, k, topic); });
-        }
-      } else if (verdict === "partial") {
-        question.keys.forEach(function (k) { _record(evidence, rejected, k, 1, "answer", null, topic); });
-      }
-      return;
-    }
-
-    var options = question.options;
-    var verdict2 = _classifyChoice(ansTokens, options);
-    if (verdict2 === "none") {
-      options.forEach(function (opt) { opt.keys.forEach(function (k) { _rejectKey(evidence, rejected, k, topic); }); });
-      return;
-    }
-    if (verdict2 === "both") {
-      options.forEach(function (opt) { opt.keys.forEach(function (k) { _record(evidence, rejected, k, confirmWeight, confirmSource, null, topic); }); });
-      return;
-    }
-    if (verdict2 instanceof Set && verdict2.size > 0) {
-      verdict2.forEach(function (idx) {
-        options[idx].keys.forEach(function (k) { _record(evidence, rejected, k, confirmWeight, confirmSource, null, topic); });
-      });
-      if (verdict2.size === 1 && !isOpening) {
-        options.forEach(function (opt, i) {
-          if (!verdict2.has(i)) {
-            opt.keys.forEach(function (k) { _rejectKey(evidence, rejected, k, topic); });
-          }
-        });
-      }
-      return;
-    }
-    // verdict2 === null: no clear choice - keyword scoring (done separately) is all we get.
-  }
-
-  function _questionKeys(q) {
-    if (q.kind === "yesno") return new Set(q.keys);
-    var result = new Set();
-    q.options.forEach(function (opt) { opt.keys.forEach(function (k) { result.add(k); }); });
-    return result;
+    return { ids: matched2, extraText: fullText };
   }
 
   // ==========================================================================
-  // ניתוח מלא של תמליל השיחה
+  // שחזור מצב השאלון מהתמליל, וזיהוי תמליל "legacy"
   // ==========================================================================
 
-  function _analyze(initialDescription, transcript) {
-    var evidence = _newEvidenceStore();
-    var rejected = {};
-    var askedTexts = new Set();
+  function _lastQuestionEntry(transcript) {
+    for (var i = transcript.length - 1; i >= 0; i--) {
+      if (transcript[i].type === "question") return transcript[i];
+    }
+    return null;
+  }
 
-    var descTokens = tokenize(initialDescription);
-    _scoreText(descTokens, evidence, rejected, "description");
+  function _isLegacyTranscript(transcript) {
+    var lastQ = _lastQuestionEntry(transcript);
+    if (lastQ === null) return false;
+    return !lastQ.question_id;
+  }
 
+  function _firstProposalIndex(transcript) {
+    for (var i = 0; i < transcript.length; i++) {
+      if (transcript[i].type === "proposal") return i;
+    }
+    return null;
+  }
+
+  function _replayStructured(transcript) {
+    var groupSelection = null;
+    var groupAnswers = {};
+    var freeText = [];
     var pendingQuestion = null;
+
     transcript.forEach(function (entry) {
       var etype = entry.type;
       var text = entry.text || "";
 
       if (etype === "question") {
-        askedTexts.add(text);
-        pendingQuestion = QUESTION_BY_TEXT.hasOwnProperty(text) ? QUESTION_BY_TEXT[text] : null;
+        pendingQuestion = entry;
         return;
       }
 
       if (etype === "answer") {
-        var isChallenge = text.indexOf(CHALLENGE_PREFIX) === 0;
-        var ansText = isChallenge ? text.slice(CHALLENGE_PREFIX.length) : text;
-        var ansTokens = tokenize(ansText);
-
-        if (pendingQuestion !== null && !isChallenge) {
-          _applyQuestionAnswer(pendingQuestion, ansTokens, evidence, rejected);
+        if (text.indexOf(CHALLENGE_PREFIX) === 0) {
+          pendingQuestion = null;
+          return;
         }
-
-        _scoreText(ansTokens, evidence, rejected, "answer");
+        if (pendingQuestion !== null && pendingQuestion.options) {
+          var parsed = _parseMultiselectAnswer(text, pendingQuestion);
+          if (parsed.extraText) freeText.push(parsed.extraText);
+          var qid = pendingQuestion.question_id;
+          if (qid === GROUP_QUESTION_ID) {
+            groupSelection = parsed.ids;
+          } else if (qid && qid.indexOf("group_") === 0) {
+            groupAnswers[qid.slice("group_".length)] = parsed.ids;
+          }
+        } else if (text) {
+          freeText.push(text);
+        }
         pendingQuestion = null;
         return;
       }
@@ -5022,119 +4523,57 @@
       pendingQuestion = null;
     });
 
-    return { evidence: evidence, rejected: rejected, askedTexts: askedTexts };
+    return { groupSelection: groupSelection, groupAnswers: groupAnswers, freeText: freeText };
   }
 
-  // ==========================================================================
-  // F. בחירת השאלה הבאה
-  // ==========================================================================
-
-  function _topCandidates(scores) {
-    var items = [];
-    ALL_KEYS.forEach(function (k) {
-      if (scores[k] >= QUALIFY_MIN_SCORE) items.push([k, scores[k]]);
-    });
-    items.sort(function (a, b) {
-      if (b[1] !== a[1]) return b[1] - a[1];
-      return REMEDY_INDEX[a[0]] - REMEDY_INDEX[b[0]];
-    });
-    return items.slice(0, MAX_REMEDIES_IN_BLEND);
-  }
-
-  function _pickQuestion(scores, rejected, askedTexts, askedCount) {
-    var top = _topCandidates(scores);
-
-    var candidates = [];
-    CLARIFYING_QUESTIONS.forEach(function (q) {
-      if (askedTexts.has(q.text)) return;
-      var keysOfQ = _questionKeys(q);
-      if (keysOfQ.size > 0) {
-        var allRejected = true;
-        keysOfQ.forEach(function (k) { if (!rejected[k]) allRejected = false; });
-        if (allRejected) return;
+  function _orderedSelectedGroups(groupSelection, descScores) {
+    var seen = {};
+    var unique = [];
+    groupSelection.forEach(function (gid) {
+      if (GROUP_BY_ID.hasOwnProperty(gid) && !seen[gid]) {
+        seen[gid] = true;
+        unique.push(gid);
       }
-      candidates.push(q);
     });
+    unique.sort(function (a, b) {
+      var sa = _groupDescScore(GROUP_BY_ID[a], descScores);
+      var sb = _groupDescScore(GROUP_BY_ID[b], descScores);
+      if (sb !== sa) return sb - sa;
+      return GROUP_ORDER[a] - GROUP_ORDER[b];
+    });
+    return unique;
+  }
 
-    if (candidates.length === 0) return null;
-
-    function relevantAmong(pool) {
-      var found = [];
-      pool.forEach(function (q) {
-        var keysOfQ = _questionKeys(q);
-        var touched = top.filter(function (ks) { return keysOfQ.has(ks[0]); });
-        if (touched.length > 0) {
-          var maxScore = touched.reduce(function (m, ks) { return Math.max(m, ks[1]); }, -Infinity);
-          var count = touched.length;
-          found.push([q, maxScore, count]);
-        }
-      });
-      found.sort(function (a, b) {
-        if (b[1] !== a[1]) return b[1] - a[1];
-        if (b[2] !== a[2]) return b[2] - a[2];
-        return QUESTION_ORDER[a[0].id] - QUESTION_ORDER[b[0].id];
-      });
-      return found;
-    }
-
-    var nonOpening = candidates.filter(function (q) { return !q.opening; });
-    var relevant = relevantAmong(nonOpening);
-    if (relevant.length > 0) return relevant[0][0];
-
-    var opening = candidates.filter(function (q) { return !!q.opening; });
-    if (opening.length > 0) return opening[0];
-
-    return null;
+  function _descriptionScores(initialDescription, extraFreeText) {
+    var evidence = _newEvidenceStore();
+    _scoreText(tokenize(initialDescription), evidence, "description");
+    (extraFreeText || []).forEach(function (snippet) {
+      _scoreText(tokenize(snippet), evidence, "answer");
+    });
+    return _scores(evidence);
   }
 
   // ==========================================================================
-  // H. בניית ההרכב הסופי (ללא מילוי מלאכותי - רק תמציות עם עדות)
+  // בניית ההרכב הסופי מהבחירות המובנות - בדיוק מה שסומן, בלי חיתוך
   // ==========================================================================
 
   var NO_PATTERN_MESSAGE = "לא זוהה דפוס רגשי ברור מהמידע שנמסר. מומלץ להוסיף תמציות באופן ידני מתוך הרשימה המלאה באמצעות הכפתור \"+ הוסיפו תמצית נוספת\", ולשקול לאסוף מהמטופל/ת תיאור מפורט יותר בפגישה הבאה או בשיחת המשך.";
 
-  function _chooseBlend(scores, rejected, evidence) {
-    var chosen = ALL_KEYS.filter(function (k) {
-      return !rejected[k] && (scores[k] >= QUALIFY_MIN_SCORE || _hasConfirmed(evidence[k]));
-    });
-    chosen.sort(function (a, b) {
-      if (scores[b] !== scores[a]) return scores[b] - scores[a];
-      return REMEDY_INDEX[a] - REMEDY_INDEX[b];
-    });
-    return chosen.slice(0, MAX_REMEDIES_IN_BLEND);
-  }
-
-  function _formatReason(key, items) {
+  function _formatStructuredReason(key, checkedByPractitioner, evidenceItems) {
     var flower = BY_KEY[key];
-    var quotes = [];
-    for (var i = 0; i < items.length; i++) {
-      var item = items[i];
-      if ((item.source === "description" || item.source === "answer") && item.surface) {
-        if (quotes.indexOf(item.surface) === -1) quotes.push(item.surface);
-        if (quotes.length >= 4) break;
-      }
-    }
-
-    var topics = [];
-    items.forEach(function (item) {
-      if (item.source === "confirmed" && item.topic && topics.indexOf(item.topic) === -1) {
-        topics.push(item.topic);
-      }
-    });
-
     var parts = [flower.keynote];
+    if (checkedByPractitioner) {
+      parts.push("\u05E1\u05D5\u05DE\u05DF/\u05D4 \u05E2\u05DC \u05D9\u05D3\u05D9 \u05D4\u05DE\u05D8\u05E4\u05DC/\u05EA \u05D1\u05E9\u05D0\u05DC\u05D5\u05DF.");
+    }
+    var quotes = _matchedSurfaces(evidenceItems);
     if (quotes.length) {
       var quoted = quotes.join("', '");
-      parts.push("\u05D1\u05D3\u05D1\u05E8\u05D9 \u05D4\u05DE\u05D8\u05D5\u05E4\u05DC/\u05EA \u05E2\u05DC\u05D5 \u05D4\u05D1\u05D9\u05D8\u05D5\u05D9\u05D9\u05DD: '" + quoted + "'.");
-    }
-    if (topics.length) {
-      var topicsStr = topics.join(", ");
-      parts.push("\u05D0\u05D5\u05E9\u05E8 \u05D1\u05EA\u05E9\u05D5\u05D1\u05D4 \u05DC\u05E9\u05D0\u05DC\u05D4 \u05E2\u05DC " + topicsStr + ".");
+      parts.push("\u05D1\u05EA\u05D9\u05D0\u05D5\u05E8 \u05E2\u05DC\u05D5 \u05D4\u05D1\u05D9\u05D8\u05D5\u05D9\u05D9\u05DD: '" + quoted + "'.");
     }
     return parts.join(" ");
   }
 
-  function _buildGeneralNotes(chosen, evidence, rejected) {
+  function _buildGeneralNotesStructured(chosen, evidence, addedByChallenge) {
     var groupOrder = [];
     var groups = {};
     chosen.forEach(function (k) {
@@ -5148,10 +4587,8 @@
       var names = keys.map(function (k) { return BY_KEY[k].name_he; }).join(" \u05D5");
       var terms = [];
       keys.forEach(function (k) {
-        evidence[k].forEach(function (item) {
-          if ((item.source === "description" || item.source === "answer") && item.surface) {
-            if (terms.indexOf(item.surface) === -1) terms.push(item.surface);
-          }
+        _matchedSurfaces(evidence[k], 6).forEach(function (term) {
+          if (terms.indexOf(term) === -1) terms.push(term);
         });
       });
       var clause = "\u05DC" + names + " \u05D4\u05EA\u05D0\u05DE\u05D4 \u05D1\u05E7\u05D1\u05D5\u05E6\u05EA " + groupName;
@@ -5164,33 +4601,38 @@
 
     var paragraph = clauses.length ? (clauses.join("; ") + ".") : "";
 
-    var rejectedWithEvidence = ALL_KEYS.filter(function (k) {
-      return rejected[k] && evidence[k].some(function (item) { return item.weight > 0; });
-    });
-    rejectedWithEvidence.sort(function (a, b) { return REMEDY_INDEX[a] - REMEDY_INDEX[b]; });
-    if (rejectedWithEvidence.length) {
-      var names2 = rejectedWithEvidence.map(function (k) { return BY_KEY[k].name_he; }).join(", ");
-      paragraph += " \u05E0\u05D1\u05D3\u05E7 \u05D5\u05E0\u05E9\u05DC\u05DC: " + names2 + ".";
+    if (chosen.length > SOFT_BLEND_SIZE_NOTE_THRESHOLD) {
+      paragraph += " \u05D4\u05D4\u05E8\u05DB\u05D1 \u05DB\u05D5\u05DC\u05DC " + chosen.length + " \u05EA\u05DE\u05E6\u05D9\u05D5\u05EA - \u05D1\u05E4\u05E8\u05E7\u05D8\u05D9\u05E7\u05D4 \u05E9\u05DC \u05D1\u05D0\u05DA \u05E0\u05D4\u05D5\u05D2 \u05D1\u05D3\u05E8\u05DA \u05DB\u05DC\u05DC \u05E2\u05D3 6-7 \u05EA\u05DE\u05E6\u05D9\u05D5\u05EA \u05D1\u05D4\u05E8\u05DB\u05D1 \u05D0\u05D7\u05D3, \u05D5\u05DB\u05D3\u05D0\u05D9 \u05DC\u05E9\u05E7\u05D5\u05DC \u05DC\u05EA\u05E2\u05D3\u05E3 \u05D0\u05EA \u05D4\u05DE\u05E8\u05DB\u05D6\u05D9\u05D5\u05EA \u05E9\u05D1\u05D4\u05DF.";
+    }
+
+    if (addedByChallenge && addedByChallenge.length) {
+      var addedParts = addedByChallenge.map(function (k) {
+        var surfaces = _matchedSurfaces(evidence[k], 3);
+        var name = BY_KEY[k].name_he;
+        if (surfaces.length) {
+          return name + " (\u05E2\u05DC \u05D1\u05E1\u05D9\u05E1 '" + surfaces.join(", ") + "')";
+        }
+        return name;
+      });
+      paragraph += " \u05D1\u05E2\u05E7\u05D1\u05D5\u05EA \u05D4\u05D4\u05E2\u05E8\u05D4 \u05D4\u05D0\u05D7\u05E8\u05D5\u05E0\u05D4 \u05E0\u05D5\u05E1\u05E4\u05D5 \u05DC\u05D4\u05E8\u05DB\u05D1: " + addedParts.join("; ") + ".";
     }
 
     return paragraph.trim();
   }
 
-  function _buildRemedyEntries(chosen, evidence) {
-    return chosen.map(function (key) {
-      var flower = BY_KEY[key];
-      return {
-        key: key,
-        name_he: flower.name_he,
-        name_en: flower.name_en,
-        reason: _formatReason(key, evidence[key]),
-      };
+  function _finalizeStructured(initialDescription, orderedSelectedGroups, groupAnswers, freeText, addedByChallenge) {
+    addedByChallenge = addedByChallenge || [];
+    var chosen = [];
+    orderedSelectedGroups.forEach(function (gid) {
+      (groupAnswers[gid] || []).forEach(function (k) {
+        if (chosen.indexOf(k) === -1) chosen.push(k);
+      });
     });
-  }
+    addedByChallenge.forEach(function (k) {
+      if (chosen.indexOf(k) === -1) chosen.push(k);
+    });
 
-  function _finalize(scores, rejected, evidence) {
-    var chosen = _chooseBlend(scores, rejected, evidence);
-    if (chosen.length === 0) {
+    if (!chosen.length) {
       return {
         type: "proposal",
         remedies: [],
@@ -5199,8 +4641,24 @@
       };
     }
 
-    var remedies = _buildRemedyEntries(chosen, evidence);
-    var generalNotes = _buildGeneralNotes(chosen, evidence, rejected);
+    var evidence = _newEvidenceStore();
+    _scoreText(tokenize(initialDescription), evidence, "description");
+    freeText.forEach(function (snippet) { _scoreText(tokenize(snippet), evidence, "answer"); });
+
+    var addedSet = {};
+    addedByChallenge.forEach(function (k) { addedSet[k] = true; });
+
+    var remedies = chosen.map(function (key) {
+      var flower = BY_KEY[key];
+      return {
+        key: key,
+        name_he: flower.name_he,
+        name_en: flower.name_en,
+        reason: _formatStructuredReason(key, !addedSet[key], evidence[key]),
+      };
+    });
+
+    var generalNotes = _buildGeneralNotesStructured(chosen, evidence, addedByChallenge);
 
     return {
       type: "proposal",
@@ -5216,27 +4674,91 @@
       "\u05DE\u05D5\u05DE\u05DC\u05E5 \u05DC\u05D4\u05E2\u05E8\u05D9\u05DA \u05DE\u05D7\u05D3\u05E9 \u05D0\u05EA \u05D4\u05D4\u05E8\u05DB\u05D1 \u05DC\u05D0\u05D7\u05E8 \u05DB-3-4 \u05E9\u05D1\u05D5\u05E2\u05D5\u05EA.";
   }
 
+  function _challengeAdd(initialDescription, transcript, proposalIndex) {
+    var prefix = transcript.slice(0, proposalIndex);
+    var replay = _replayStructured(prefix);
+    var groupSelection = replay.groupSelection, groupAnswers = replay.groupAnswers, freeText = replay.freeText;
+    var descScores = _descriptionScores(initialDescription, freeText);
+
+    var ordered, originalChosen;
+    if (groupSelection === null) {
+      originalChosen = ALL_KEYS.filter(function (k) { return (descScores[k] || 0) >= SUGGEST_MIN_SCORE; });
+      groupAnswers = { "__legacy__": originalChosen };
+      ordered = ["__legacy__"];
+    } else {
+      ordered = _orderedSelectedGroups(groupSelection, descScores);
+      originalChosen = [];
+      ordered.forEach(function (gid) {
+        (groupAnswers[gid] || []).forEach(function (k) {
+          if (originalChosen.indexOf(k) === -1) originalChosen.push(k);
+        });
+      });
+    }
+
+    var challengeTexts = [];
+    for (var i = proposalIndex; i < transcript.length; i++) {
+      var e = transcript[i];
+      var t = e.text || "";
+      if (e.type === "answer" && t.indexOf(CHALLENGE_PREFIX) === 0) {
+        challengeTexts.push(t.slice(CHALLENGE_PREFIX.length));
+      }
+    }
+
+    var added = [];
+    challengeTexts.forEach(function (text) {
+      var ev = _newEvidenceStore();
+      _scoreText(tokenize(text), ev, "answer");
+      var scores = _scores(ev);
+      ALL_KEYS.forEach(function (key) {
+        if ((scores[key] || 0) >= SUGGEST_MIN_SCORE && originalChosen.indexOf(key) === -1 && added.indexOf(key) === -1) {
+          added.push(key);
+        }
+      });
+      freeText.push(text);
+    });
+
+    return _finalizeStructured(initialDescription, ordered, groupAnswers, freeText, added);
+  }
+
   // ==========================================================================
   // API ציבורי
   // ==========================================================================
 
   function next_step(initialDescription, historyContext, transcript) {
-    var analyzed = _analyze(initialDescription, transcript);
-    var evidence = analyzed.evidence, rejected = analyzed.rejected, askedTexts = analyzed.askedTexts;
-    var scores = _scores(evidence, rejected, []);
-    var askedCount = transcript.filter(function (e) { return e.type === "question"; }).length;
-
-    if (askedCount >= MAX_QUESTIONS) {
-      return _finalize(scores, rejected, evidence);
+    var proposalIndex = _firstProposalIndex(transcript);
+    if (proposalIndex !== null) {
+      return _challengeAdd(initialDescription, transcript, proposalIndex);
     }
 
-    var questionScores = _questionSelectionScores(evidence, rejected);
-    var question = _pickQuestion(questionScores, rejected, askedTexts, askedCount);
-    if (question === null) {
-      return _finalize(scores, rejected, evidence);
+    if (_isLegacyTranscript(transcript)) {
+      var oldFreeText = transcript.filter(function (e) {
+        return e.type === "answer" && (e.text || "").indexOf(CHALLENGE_PREFIX) !== 0;
+      }).map(function (e) { return e.text || ""; });
+      var descScores1 = _descriptionScores(initialDescription, oldFreeText);
+      var gq1 = _buildGroupQuestion(descScores1);
+      return { type: "question", question_id: gq1.question_id, text: gq1.text, multi: gq1.multi, options: gq1.options };
     }
 
-    return { type: "question", text: question.text };
+    var replay = _replayStructured(transcript);
+    var groupSelection = replay.groupSelection, groupAnswers = replay.groupAnswers, freeText = replay.freeText;
+
+    if (groupSelection === null) {
+      var descScores2 = _descriptionScores(initialDescription);
+      var gq2 = _buildGroupQuestion(descScores2);
+      return { type: "question", question_id: gq2.question_id, text: gq2.text, multi: gq2.multi, options: gq2.options };
+    }
+
+    var descScores3 = _descriptionScores(initialDescription, freeText);
+    var ordered = _orderedSelectedGroups(groupSelection, descScores3);
+
+    var remaining = ordered.filter(function (gid) { return !groupAnswers.hasOwnProperty(gid); });
+    if (remaining.length) {
+      var nextGroup = GROUP_BY_ID[remaining[0]];
+      var grq = _buildGroupRemedyQuestion(nextGroup, descScores3);
+      return { type: "question", question_id: grq.question_id, text: grq.text, multi: grq.multi, options: grq.options };
+    }
+
+    return _finalizeStructured(initialDescription, ordered, groupAnswers, freeText);
   }
 
   var QUESTION_MARKERS = [
@@ -5294,25 +4816,35 @@
   }
 
   var api = {
-    MIN_QUESTIONS: MIN_QUESTIONS,
-    MAX_QUESTIONS: MAX_QUESTIONS,
-    MAX_REMEDIES_IN_BLEND: MAX_REMEDIES_IN_BLEND,
-    QUALIFY_MIN_SCORE: QUALIFY_MIN_SCORE,
-    QUALITY_GATE_MIN_SCORE: QUALITY_GATE_MIN_SCORE,
     REMEDY_ORDER: REMEDY_ORDER,
     ALL_KEYS: ALL_KEYS,
     LEXICON: LEXICON,
-    CLARIFYING_QUESTIONS: CLARIFYING_QUESTIONS,
-    QUESTION_BY_TEXT: QUESTION_BY_TEXT,
+    GROUPS: GROUPS,
+    GROUP_BY_ID: GROUP_BY_ID,
+    NONE_OPTION_LABEL: NONE_OPTION_LABEL,
+    REMEDY_LABELS: REMEDY_LABELS,
+    GROUP_QUESTION_ID: GROUP_QUESTION_ID,
+    GROUP_QUESTION_TEXT: GROUP_QUESTION_TEXT,
+    CHALLENGE_PREFIX: CHALLENGE_PREFIX,
+    SUGGEST_MIN_SCORE: SUGGEST_MIN_SCORE,
+    SOFT_BLEND_SIZE_NOTE_THRESHOLD: SOFT_BLEND_SIZE_NOTE_THRESHOLD,
+    NO_PATTERN_MESSAGE: NO_PATTERN_MESSAGE,
+    QUESTION_MARKERS: QUESTION_MARKERS,
     next_step: next_step,
     explain_if_asked: explain_if_asked,
     has_signal: has_signal,
     build_history_context: build_history_context,
-    // חשופים גם לצורך בדיקות פנימיות (מקביל ל-engine._analyze וכו' בפייתון)
+    // חשופים גם לצורך בדיקות פנימיות
     tokenize: tokenize,
-    _analyze: _analyze,
-    _questionKeys: _questionKeys,
-    _scores: _scores,
+    _isLegacyTranscript: _isLegacyTranscript,
+    _firstProposalIndex: _firstProposalIndex,
+    _replayStructured: _replayStructured,
+    _parseMultiselectAnswer: _parseMultiselectAnswer,
+    _descriptionScores: _descriptionScores,
+    _buildGroupQuestion: _buildGroupQuestion,
+    _buildGroupRemedyQuestion: _buildGroupRemedyQuestion,
+    _orderedSelectedGroups: _orderedSelectedGroups,
+    _groupQuestionId: _groupQuestionId,
   };
 
   var ns = global.BachApp = global.BachApp || {};

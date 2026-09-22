@@ -232,6 +232,10 @@ button,
   .remedy-body { flex-basis: 100%; min-width: 0; }
 
   .msg-row, .msg.answer { max-width: 100%; }
+
+  /* -------- structured questionnaire checkboxes: comfortable touch target -------- */
+
+  .option-row { min-height: 44px; }
 }
 
 /* No horizontal scroll at very small widths */
